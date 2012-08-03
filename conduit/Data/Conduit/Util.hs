@@ -28,11 +28,11 @@ import Data.Conduit.Util.Conduit
 zip :: Monad m => Source m a -> Source m b -> Source m (a, b)
 zip (Leftover left ()) right = zip left right
 zip left (Leftover right ())  = zip left right
-zip (Done ()) (Done ()) = Done ()
-zip (Done ()) (HaveOutput _ close _) = PipeM (close >> return (Done ()))
-zip (HaveOutput _ close _) (Done ()) = PipeM (close >> return (Done ()))
-zip (Done ()) (PipeM _) = Done ()
-zip (PipeM _) (Done ()) = Done ()
+zip (Done l ()) (Done r ()) = Done (l >> r) ()
+zip (Done l ()) (HaveOutput _ close _) = Done (l >> close) ()
+zip (HaveOutput _ close _) (Done r ()) = Done (close >> r) ()
+zip (Done l ()) (PipeM _) = Done l ()
+zip (PipeM _) (Done r ()) = Done r ()
 zip (PipeM mx) (PipeM my) = PipeM (liftM2 zip mx my)
 zip (PipeM mx) y@HaveOutput{} = PipeM (liftM (\x -> zip x y) mx)
 zip x@HaveOutput{} (PipeM my) = PipeM (liftM (zip x) my)
@@ -59,7 +59,7 @@ zipSinks x0 y0 =
 
     PipeM mx         >< y                = PipeM (liftM (>< y) mx)
     x                >< PipeM my         = PipeM (liftM (x ><) my)
-    Done x           >< Done y           = Done (x, y)
+    Done l x         >< Done r y         = Done (l >> r) (x, y)
     NeedInput px cx  >< NeedInput py cy  = NeedInput (\i -> px i >< py i) (\() -> cx () >< cy ())
     NeedInput px cx  >< y@Done{}         = NeedInput (\i -> px i >< y)    (\u -> cx u >< y)
     x@Done{}         >< NeedInput py cy  = NeedInput (\i -> x >< py i)    (\u -> x >< cy u)

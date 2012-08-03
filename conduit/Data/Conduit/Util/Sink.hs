@@ -38,7 +38,7 @@ sinkState state0 push0 close0 =
             res <- state `seq` push0 state input
             case res of
                 StateProcessing state' -> return $ NeedInput (push state') (\() -> close state')
-                StateDone mleftover output -> return $ maybe id (flip Leftover) mleftover $ Done output)
+                StateDone mleftover output -> return $ maybe id (flip Leftover) mleftover $ Done (return ()) output)
 
     close = lift . close0
 
@@ -71,7 +71,7 @@ sinkIO alloc cleanup push0 close0 = NeedInput
         case res of
             IODone a b -> do
                 release key
-                return $ maybe id (flip Leftover) a $ Done b
+                return $ maybe id (flip Leftover) a $ Done (return ()) b
             IOProcessing -> return $ NeedInput
                 (PipeM . push key state)
                 (\() -> lift $ close key state)

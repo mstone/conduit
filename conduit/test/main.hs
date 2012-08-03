@@ -30,7 +30,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer (execWriter, tell)
 import Control.Applicative (pure, (<$>), (<*>))
 import Data.Functor.Identity (runIdentity)
-import Control.Monad (forever)
+import Control.Monad (forever, unless)
 import Data.Void (Void)
 
 (@=?) :: (Eq a, Show a) => a -> a -> IO ()
@@ -600,7 +600,7 @@ main = hspec $ do
             ref <- I.newIORef []
             let add x = I.modifyIORef ref (x:)
                 adder = CI.NeedInput (\a -> liftIO (add a) >> adder) return
-                residue x = CI.Leftover (CI.Done ()) x
+                residue x = CI.Leftover (CI.Done (return ()) ()) x
 
             _ <- CI.yield 1 C.$$ adder
             x <- I.readIORef ref
@@ -785,6 +785,20 @@ main = hspec $ do
         it "conduit" $ do
             let run p = execWriter $ src C.$$ p C.=$ printer
             run ((p3 C.=$= p2) C.=$= p1) `shouldBe` run (p3 C.=$= (p2 C.=$= p1))
+    describe "finalizer order" $ do
+        let p1 = C.await >>= maybe (return ()) C.yield
+            p2 = idMsg "p2-final"
+            p3 = idMsg "p3-final"
+            finallyP fin pipe = C.addCleanup (\x -> unless x fin) (pipe >> lift fin)
+            idMsg msg = C.addCleanup (const $ tell [msg]) $ C.awaitForever C.yield
+            printer = C.awaitForever $ lift . tell . return . show
+            src = CL.sourceList [1 :: Int ..]
+        it "pipe" $ do
+            let run p = execWriter $ C.runPipe $ printer C.<+< p C.<+< src
+            run (p2 C.<+< (p1 C.<+< p3)) `shouldBe` run ((p2 C.<+< p1) C.<+< p3)
+        it "conduit" $ do
+            let run p = execWriter $ src C.$$ p C.=$ printer
+            run ((p3 C.=$= p1) C.=$= p2) `shouldBe` run (p3 C.=$= (p1 C.=$= p2))
 
 it' :: String -> IO () -> Spec
 it' = it

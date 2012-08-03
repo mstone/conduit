@@ -20,7 +20,7 @@ import Control.Monad.Trans.Resource (MonadActive (monadActive))
 --
 -- Since 0.3.0
 lazyConsume :: (MonadBaseControl IO m, MonadActive m) => Pipe l i a () m r -> m [a]
-lazyConsume (Done _) = return []
+lazyConsume (Done c _) = c >> return []
 lazyConsume (HaveOutput src _ x) = do
     xs <- lazyConsume src
     return $ x : xs

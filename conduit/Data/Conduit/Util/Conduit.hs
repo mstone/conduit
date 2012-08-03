@@ -60,7 +60,7 @@ conduitState state0 push0 close0 =
         return $ sourceList os)
 
     goRes' (StateFinished leftover output) = maybe id pipePush leftover $ haveMore
-        (Done ())
+        (Done (return ()) ())
         (return ())
         output
     goRes' (StateProducing state output) = haveMore
@@ -109,7 +109,7 @@ conduitIO alloc cleanup push0 close0 = NeedInput
             IOFinished leftover output -> do
                 release key
                 return $ maybe id pipePush leftover $ haveMore
-                    (Done ())
+                    (Done (return ()) ())
                     (return ())
                     output
 
@@ -161,7 +161,7 @@ pipePush i (NeedInput p _) =
     case p i of
         Leftover p' i' -> pipePush i' p'
         p' -> p'
-pipePush i (Done r) = Leftover (Done r) i
+pipePush i (Done c r) = Leftover (Done c r) i
 pipePush i (PipeM mp) = PipeM (pipePush i `liftM` mp)
 pipePush i (Leftover p i') =
     case pipePush i' p of
@@ -172,5 +172,5 @@ pipePush i (Leftover p i') =
 -- the stream.
 --
 -- Since 0.4.0
-hasInput :: Pipe i i o u m Bool -- FIXME consider removing
-hasInput = NeedInput (Leftover (Done True)) (const $ Done False)
+hasInput :: Monad m => Pipe i i o u m Bool -- FIXME consider removing
+hasInput = NeedInput (Leftover (Done (return ()) True)) (const $ Done (return ()) False)

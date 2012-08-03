@@ -36,7 +36,7 @@ sourceState state0 pull0 =
         res <- pull0 state
         return $ case res of
             StateOpen state' val -> HaveOutput (src state') (return ()) val
-            StateClosed -> Done ()
+            StateClosed -> Done (return ()) ()
 
 -- | The return value when pulling in the @sourceIO@ function. Either indicates
 -- no more data, or the next value.
@@ -64,7 +64,7 @@ sourceIO alloc cleanup pull0 =
         case res of
             IOClosed -> do
                 release key
-                return $ Done ()
+                return $ Done (return ()) ()
             IOOpen val -> return $ HaveOutput (src key state) (release key) val
 
 -- | A combination of 'sourceIO' and 'sourceState'.
@@ -87,7 +87,7 @@ sourceStateIO alloc cleanup pull0 =
         case res of
             StateClosed -> do
                 release key
-                return $ Done ()
+                return $ Done (return ()) ()
             StateOpen state' val -> return $ HaveOutput (src key state') (release key) val
 
 -- FIXME transPipe
