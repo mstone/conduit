@@ -102,6 +102,8 @@ data Pipe l i o u m r =
     -- | Return leftover input, which should be provided to future operations.
   | Leftover (Pipe l i o u m r) l
 
+  | CloseUpstream (Pipe l i o u m r) u
+
 instance Monad m => Functor (Pipe l i o u m) where
     fmap = liftM
 
@@ -117,6 +119,7 @@ instance Monad m => Monad (Pipe l i o u m) where
     NeedInput p c    >>= fp = NeedInput  (p >=> fp)            (c >=> fp)
     PipeM mp         >>= fp = PipeM      ((>>= fp) `liftM` mp)
     Leftover p i     >>= fp = Leftover   (p >>= fp)            i
+    CloseUpstream p u >>= fp = CloseUpstream (p >>= fp) u
 
 instance MonadBase base m => MonadBase base (Pipe l i o u m) where
     liftBase = lift . liftBase
@@ -330,16 +333,18 @@ pipe =
             PipeM mp -> PipeM (liftM (pipe' final left) mp)
             Leftover _ i -> absurd i
             NeedInput rp rc -> upstream rp rc
+            CloseUpstream p u -> PipeM (final >> return (pipe (Done u) p))
       where
         upstream rp rc =
             case left of
-                Done r1 -> pipe (Done r1) (rc r1)
+                Done r1 -> CloseUpstream (pipe (Done r1) (rc r1)) (error "340")
                 HaveOutput left' final' o -> pipe' final' left' (rp o)
                 PipeM mp -> PipeM (liftM (\left' -> pipe' final left' right) mp)
                 Leftover left' i -> Leftover (pipe' final left' right) i
                 NeedInput left' lc -> NeedInput
                     (\a -> pipe' final (left' a) right)
                     (\r0 -> pipe' final (lc r0) right)
+                CloseUpstream left' u -> CloseUpstream (pipe' final left' right) u
 
 -- | Same as 'pipe', but automatically applies 'injectLeftovers' to the right @Pipe@.
 --
@@ -407,6 +412,7 @@ runPipe (NeedInput _ c) = runPipe (c ())
 runPipe (Done r) = return r
 runPipe (PipeM mp) = mp >>= runPipe
 runPipe (Leftover _ i) = absurd i
+runPipe (CloseUpstream p _) = runPipe p
 
 -- | Transforms a @Pipe@ that provides leftovers to one which does not,
 -- allowing it to be composed.
