@@ -402,6 +402,7 @@ connectResume (ResumableSource left0 leftFinal0) =
                     NeedInput _ lc -> go leftFinal (lc ()) right
                     Done () -> go (return ()) (Done ()) (rc ())
                     PipeM mp -> mp >>= \left' -> go leftFinal left' right
+                    CloseUpstream left' u -> leftFinal >> go leftFinal left' right
 
 -- | Run a pipeline until processing completes.
 --
@@ -432,6 +433,7 @@ injectLeftovers =
     go ls (Leftover p l) = go (l:ls) p
     go (l:ls) (NeedInput p _) = go ls $ p l
     go [] (NeedInput p c) = NeedInput (go [] . p) (go [] . c)
+    go ls (CloseUpstream p u) = CloseUpstream (go ls p) u
 
 -- | Transform the monad that a @Pipe@ lives in.
 --
