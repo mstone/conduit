@@ -1,24 +1,34 @@
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleContexts, ForeignFunctionInterface #-}
 -- | Streaming compression and decompression using conduits.
 --
 -- Parts of this code were taken from zlib-enum and adapted for conduits.
 module Data.Conduit.Zlib (
     -- * Conduits
-    compress, decompress, gzip, ungzip,
+    compress, decompress, gzip, ungzip, zcat,
     -- * Flushing
     compressFlush, decompressFlush,
     -- * Re-exported from zlib-bindings
-    WindowBits (..), defaultWindowBits
+    WindowBits (..), defaultWindowBits, ZlibException(..)
 ) where
 
 import Codec.Zlib
-import Data.Conduit hiding (unsafeLiftIO, Source, Sink, Conduit, Pipe)
+import Data.Conduit hiding (unsafeLiftIO, Source, Sink, Conduit)
 import qualified Data.Conduit as C (unsafeLiftIO)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as S
 import Control.Exception (try)
-import Control.Monad ((<=<), unless)
+import Control.Monad ((<=<), unless, when)
 import Control.Monad.Trans.Class (lift)
+
+import Data.IORef
+import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Resource (allocate)
+import Control.Exception (SomeException, toException)
+import Codec.Zlib.Lowlevel
+import Foreign.C
+import Foreign.Ptr
+import Foreign.Marshal.Alloc
 
 -- | Gzip compression with default parameters.
 gzip :: (MonadThrow m, MonadUnsafeIO m) => GInfConduit ByteString m ByteString
@@ -144,3 +154,79 @@ compressFlush level config =
         case mchunk of
             Nothing -> return ret
             Just chunk -> yield (Chunk chunk) >> close def ret
+
+
+zBufLen :: Int
+zBufLen = 65536
+
+zBufError :: CInt
+zBufError = -5
+
+type ZStreamFreeFunction = ZStream' -> IO ()
+foreign import ccall "dynamic" mkZStreamFreeFun :: FunPtr ZStreamFreeFunction -> ZStreamFreeFunction
+
+zstreamFreeInflate :: ZStreamFreeFunction
+zstreamFreeInflate = mkZStreamFreeFun c_free_z_stream_inflate
+
+-- |
+-- Decompress (inflate) a stream of 'ByteString's representing concatenated gzip streams, returning errors inline.
+
+zcat :: (MonadResource m)
+     => Pipe l ByteString (Either SomeException ByteString) u m ()
+zcat = do
+    (_rk_zs, zs)     <- lift $ allocate zstreamNew            zstreamFreeInflate
+    (_rk_obuf, obuf) <- lift $ allocate (mallocBytes zBufLen) free
+    refFlag <- liftIO $ newIORef True
+    liftIO $ inflateInit2 zs (WindowBits 31)
+    liftIO $ c_set_avail_out zs obuf $ fromIntegral zBufLen
+    go zs obuf refFlag
+  where
+    go :: (MonadResource m)
+        => ZStream'
+        -> Ptr CChar
+        -> IORef Bool
+        -> Pipe l ByteString (Either SomeException ByteString) u m ()
+    go zs obuf refFlag = do
+        mbs <- await
+        case mbs of
+            Nothing -> do
+                --rest <- liftIO $ finishInflate inf
+                -- ...
+                return ()
+            Just bs -> do
+                -- XXX: scope!
+                (ibuf, ilen) <- liftIO $ unsafeUseAsCStringLen bs return
+                liftIO $ c_set_avail_in zs ibuf $ fromIntegral ilen
+                goInflate False zs ibuf ilen obuf zBufLen refFlag
+                flag <- liftIO $ readIORef refFlag
+                if flag then go zs obuf refFlag else return ()
+
+    goInflate :: (MonadResource m)
+              => Bool
+              -> ZStream'
+              -> Ptr CChar
+              -> Int
+              -> Ptr CChar
+              -> Int
+              -> IORef Bool
+              -> Pipe l ByteString (Either SomeException ByteString) u m ()
+    goInflate reinitFlag zs ibuf ilen obuf olen refFlag = do
+        when reinitFlag $ liftIO $ inflateInit2 zs (WindowBits 31)
+        res <- liftIO $ c_call_inflate_noflush zs
+        -- XXX: check for zNeedDict
+        if (res < 0 && res /= zBufError)
+            then do
+                yield $ Left $ toException $ ZlibException $ fromIntegral res
+                liftIO $ writeIORef refFlag False
+            else do
+                inext <- liftIO $ c_get_next_in zs
+                let irest = ilen - (inext `minusPtr` ibuf)
+                oavail <- liftIO $ c_get_avail_out zs
+                let size = olen - fromIntegral oavail
+                obs <- liftIO $ S.packCStringLen (obuf, size)
+                liftIO $ c_set_avail_out zs obuf $ fromIntegral olen
+                if irest == 0
+                    then yield $ Right obs
+                    else do
+                        (yield $ Right obs)
+                        goInflate True zs ibuf ilen obuf olen refFlag

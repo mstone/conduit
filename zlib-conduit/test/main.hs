@@ -7,9 +7,12 @@ import qualified Data.Conduit.Zlib as CZ
 import Control.Monad.ST (runST)
 import Data.Monoid
 import qualified Data.ByteString as S
+import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
 import Data.ByteString.Lazy.Char8 ()
 import Control.Monad.Trans.Resource (runExceptionT_)
+import Control.Exception (SomeException, toException)
+import Data.Either (rights)
 
 main :: IO ()
 main = hspec $ do
@@ -37,3 +40,27 @@ main = hspec $ do
                 unChunk C.Flush = []
             bss <- CL.sourceList bssC C.$$ CL.concatMap unChunk C.=$ CZ.ungzip C.=$ CL.consume
             L.fromChunks bss `shouldBe` content
+
+    describe "zcat" $ do
+        let a_gz = S8.pack "\US\139\b\NUL)\DC3%P\STX\ETXK\228\STX\NUL\a\161\234\221\STX\NUL\NUL\NUL"
+            b_gz = S8.pack "\US\139\b\NUL)\DC3%P\STX\ETXK\226\STX\NUL\196\242\199\246\STX\NUL\NUL\NUL"
+            ab_gz = a_gz `S.append` b_gz
+            err_gz = ab_gz `S.append` (S8.pack "HIYA\n")
+            abab_gz = ab_gz `S.append` ab_gz
+
+        let pipeline :: S.ByteString -> C.ResourceT IO [Either SomeException S.ByteString]
+            pipeline x = C.yield x C.$= CZ.zcat C.$$ CL.consume
+
+        let go :: String -> S.ByteString -> [Either SomeException S.ByteString] -> Spec
+            go name gz expectedResults = do
+                it name $ do
+                  actualResults <- C.runResourceT $ pipeline gz
+                  let lhs = (mconcat $ rights $ actualResults)
+                  let rhs = (mconcat $ rights $ expectedResults)
+                  lhs `shouldBe` rhs
+
+        go "a"   a_gz     [Right $ S8.pack "a\n"]
+        go "b"   b_gz     [Right $ S8.pack "b\n"]
+        go "ab"  ab_gz    [Right $ S8.pack "a\nb\n"]
+        go "ab!" err_gz   [Right $ S8.pack "a\nb\n", Left (toException (CZ.ZlibException (-3)))]
+        go "abab" abab_gz [Right $ S8.pack "a\nb\na\nb\n"]
