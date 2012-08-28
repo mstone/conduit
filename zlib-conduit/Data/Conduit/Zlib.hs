@@ -21,9 +21,11 @@ import Control.Monad ((<=<), unless, when)
 import Control.Monad.Trans.Class (lift)
 
 import Data.IORef
+import Data.ByteString.Char8 (packCStringLen)
 import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Resource (allocate)
+import Control.Monad.Trans.Control (MonadBaseControl)
 import Control.Exception (SomeException, toException)
 import Codec.Zlib.Lowlevel
 import Foreign.C
@@ -156,9 +158,6 @@ compressFlush level config =
             Just chunk -> yield (Chunk chunk) >> close def ret
 
 
-zBufLen :: Int
-zBufLen = 65536
-
 zBufError :: CInt
 zBufError = -5
 
@@ -171,9 +170,10 @@ zstreamFreeInflate = mkZStreamFreeFun c_free_z_stream_inflate
 -- |
 -- Decompress (inflate) a stream of 'ByteString's representing concatenated gzip streams, returning errors inline.
 
-zcat :: (MonadResource m)
-     => Pipe l ByteString (Either SomeException ByteString) u m ()
-zcat = do
+zcat :: (MonadResource m, MonadBaseControl IO m)
+     => Int
+     -> Pipe l ByteString (Either SomeException ByteString) u m ()
+zcat zBufLen = do
     (_rk_zs, zs)     <- lift $ allocate zstreamNew            zstreamFreeInflate
     (_rk_obuf, obuf) <- lift $ allocate (mallocBytes zBufLen) free
     refFlag <- liftIO $ newIORef True
@@ -181,52 +181,59 @@ zcat = do
     liftIO $ c_set_avail_out zs obuf $ fromIntegral zBufLen
     go zs obuf refFlag
   where
-    go :: (MonadResource m)
-        => ZStream'
-        -> Ptr CChar
-        -> IORef Bool
-        -> Pipe l ByteString (Either SomeException ByteString) u m ()
+    go :: (MonadResource m, MonadBaseControl IO m)
+       => ZStream'
+       -> Ptr CChar
+       -> IORef Bool
+       -> Pipe l ByteString (Either SomeException ByteString) u m ()
     go zs obuf refFlag = do
         mbs <- await
         case mbs of
             Nothing -> do
-                --rest <- liftIO $ finishInflate inf
-                -- ...
                 return ()
             Just bs -> do
-                -- XXX: scope!
-                (ibuf, ilen) <- liftIO $ unsafeUseAsCStringLen bs return
-                liftIO $ c_set_avail_in zs ibuf $ fromIntegral ilen
-                goInflate False zs ibuf ilen obuf zBufLen refFlag
+                liftIO $ unsafeUseAsCStringLen bs $ \(ibuf, ilen) -> do
+                    c_set_avail_in zs ibuf $ fromIntegral ilen
+                goInflate zs bs obuf zBufLen refFlag
                 flag <- liftIO $ readIORef refFlag
                 if flag then go zs obuf refFlag else return ()
 
-    goInflate :: (MonadResource m)
-              => Bool
-              -> ZStream'
-              -> Ptr CChar
-              -> Int
+    goInflate :: (MonadResource m, MonadBaseControl IO m)
+              => ZStream'
+              -> ByteString
               -> Ptr CChar
               -> Int
               -> IORef Bool
               -> Pipe l ByteString (Either SomeException ByteString) u m ()
-    goInflate reinitFlag zs ibuf ilen obuf olen refFlag = do
-        when reinitFlag $ liftIO $ inflateInit2 zs (WindowBits 31)
+    goInflate zs bs obuf olen refFlag = do
         res <- liftIO $ c_call_inflate_noflush zs
-        -- XXX: check for zNeedDict
         if (res < 0 && res /= zBufError)
             then do
                 yield $ Left $ toException $ ZlibException $ fromIntegral res
                 liftIO $ writeIORef refFlag False
             else do
-                inext <- liftIO $ c_get_next_in zs
-                let irest = ilen - (inext `minusPtr` ibuf)
-                oavail <- liftIO $ c_get_avail_out zs
-                let size = olen - fromIntegral oavail
-                obs <- liftIO $ S.packCStringLen (obuf, size)
-                liftIO $ c_set_avail_out zs obuf $ fromIntegral olen
-                if irest == 0
-                    then yield $ Right obs
-                    else do
-                        (yield $ Right obs)
-                        goInflate True zs ibuf ilen obuf olen refFlag
+                (outputChunk, inputBytesRemaining) <- liftIO $ do
+                    unsafeUseAsCStringLen bs $ \(ibuf, ilen) -> do
+                        -- calculate the output length
+                        outputBytesRemaining <- liftIO $ c_get_avail_out zs
+                        let outputBytesProduced = olen - fromIntegral outputBytesRemaining
+
+                        -- copy the output and reset the z_stream output buffer
+                        outputChunk <- liftIO $ packCStringLen (obuf, outputBytesProduced)
+                        liftIO $ c_set_avail_out zs obuf $ fromIntegral olen
+
+                        -- calculate how much input was consumed
+                        inext <- liftIO $ c_get_next_in zs
+                        let inputBytesRemaining = ilen - (inext `minusPtr` ibuf)
+
+                        return (outputChunk, inputBytesRemaining)
+                case res of
+                    1 -> do -- zStreamEnd
+                        yield $ Right outputChunk
+                        _res <- liftIO $ inflateReset2 zs (WindowBits 31)
+                        when (inputBytesRemaining > 0) $ goInflate zs bs obuf olen refFlag
+                    0 -> do -- zOk
+                        yield $ Right outputChunk
+                        when (inputBytesRemaining > 0) $ goInflate zs bs obuf olen refFlag
+                    _ -> do
+                        liftIO $ writeIORef refFlag False

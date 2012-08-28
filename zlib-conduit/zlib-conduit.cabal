@@ -23,6 +23,7 @@ Library
                      , zlib-bindings            >= 0.1.0.2      && < 0.2
                      , conduit                  >= 0.5          && < 0.6
                      , resourcet                >= 0.3          && < 0.4
+                     , monad-control
                      , void
   ghc-options:     -Wall
 
@@ -39,6 +40,7 @@ test-suite test
                    , transformers
                    , zlib-conduit
                    , resourcet
+                   , monad-control
     ghc-options:     -Wall
 
 source-repository head
